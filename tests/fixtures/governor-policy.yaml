@@ -1,0 +1,57 @@
+apiVersion: gateway-policy.databricks.com/v1
+kind: GatewayPolicyBundle
+metadata:
+  name: governor-test-bundle
+  owner: test@example.com
+  managedBy: gateway-policy
+
+spec:
+  account:
+    accountId: "11111111-1111-1111-1111-111111111111"
+    profile: DEFAULT
+
+  workspaces:
+    - name: prod
+      host: https://adb-1234567890123456.0.azuredatabricks.net
+
+  rateLimits:
+    - name: endpoint-cap
+      workspace: prod
+      endpoint: main.serving.chat
+      limits:
+        - scope: endpoint
+          qpm: 100
+          tpm: 100000
+
+  governors:
+    - name: monthly-burn
+      workspace: prod
+      rateLimitPolicy: endpoint-cap
+      sqlWarehouseId: wh-test
+      monthlyTargetUsd: 20000
+      modelPrices:
+        - model: test-model
+          inputUsdPerMillionTokens: 1.0
+          outputUsdPerMillionTokens: 2.0
+      stages:
+        - name: caution
+          forecastUtilizationPct: 70
+          qpmMultiplier: 0.75
+          tpmMultiplier: 0.75
+        - name: emergency
+          forecastUtilizationPct: 100
+          qpmMultiplier: 0.1
+          tpmMultiplier: 0.1
+          blockProxyTraffic: true
+
+  sessionBudgets:
+    - name: agent-session
+      workspace: prod
+      endpoint: main.serving.chat
+      upstreamBaseUrl: http://upstream.test/v1
+      maxUsd: 10
+      maxTotalTokens: 100000
+      modelPrices:
+        - model: test-model
+          inputUsdPerMillionTokens: 1.0
+          outputUsdPerMillionTokens: 2.0

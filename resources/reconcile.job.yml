@@ -1,0 +1,47 @@
+resources:
+  jobs:
+    reconcile:
+      name: adaptive-ai-spend-reconcile-${bundle.target}
+      description: Reconcile authoritative spend telemetry into adaptive AI Gateway controls
+      run_as:
+        service_principal_name: ${var.run_as_service_principal_name}
+      schedule:
+        quartz_cron_expression: "0 0/10 * * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+      tasks:
+        - task_key: reconcile
+          python_wheel_task:
+            package_name: gateway_policy
+            entry_point: gateway-governor-reconcile
+            parameters:
+              - --policy-file
+              - ${workspace.file_path}/deployment/gateway-policy.yaml
+              - --warehouse-id
+              - ${var.warehouse_id}
+              - --governed-endpoint
+              - ${var.governed_endpoint_name}
+              - --forecast-endpoint
+              - ${var.forecast_endpoint_name}
+              - --lakebase-endpoint
+              - ${var.lakebase_endpoint}
+              - --lakebase-database
+              - ${var.lakebase_database}
+          job_cluster_key: governor
+          libraries:
+            - whl: ../dist/*.whl
+      job_clusters:
+        - job_cluster_key: governor
+          new_cluster:
+            spark_version: 16.4.x-scala2.12
+            node_type_id: ${var.node_type_id}
+            num_workers: 0
+            data_security_mode: SINGLE_USER
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: local[*]
+            custom_tags:
+              ResourceClass: SingleNode
+      permissions:
+        - service_principal_name: ${var.run_as_service_principal_name}
+          level: CAN_MANAGE_RUN

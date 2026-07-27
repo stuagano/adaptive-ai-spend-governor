@@ -1,0 +1,32 @@
+apiVersion: gateway-policy.databricks.com/v1
+kind: GatewayPolicyBundle
+metadata:
+  name: test-bundle
+  owner: owner@example.com
+  managedBy: gateway-policy
+spec:
+  account:
+    accountId: "11111111-1111-1111-1111-111111111111"
+    profile: DEFAULT
+  workspaces:
+    - name: prod
+      profile: prod
+      host: https://adb-1234567890123456.0.azuredatabricks.net
+  budgets:
+    - name: gateway-soft-cap
+      displayName: Gateway soft cap
+      resourceType: unity_ai_gateway
+      workspaces: [prod]
+      tags:
+        team: ml
+      sharedThresholds:
+        - amountUsd: 1000
+          emails: [finops@example.com]
+  rateLimits:
+    - name: endpoint-cap
+      workspace: prod
+      endpoint: main.serving.chat
+      limits:
+        - scope: endpoint
+          qpm: 100
+          tpm: 10000

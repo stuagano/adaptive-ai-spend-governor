@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gateway-policy"
+version = "0.1.0"
+description = "Policy-as-code for Databricks Unity AI Gateway budgets and rate limits"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Databricks Field Engineering" }]
+dependencies = [
+  "click>=8.1",
+  "databricks-sdk>=0.81",
+  "fastapi>=0.115",
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "psycopg[binary]>=3.2",
+  "pyyaml>=6.0",
+  "rich>=13.7",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+zerobus = [
+  "databricks-zerobus-ingest-sdk>=1.0",
+]
+dev = [
+  "build>=1.2",
+  "mypy>=1.10",
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "ruff>=0.5",
+  "types-PyYAML>=6.0",
+  "httpx>=0.27",
+]
+
+[project.scripts]
+gateway-policy = "gateway_policy.cli:main"
+gateway-governor-app = "gateway_policy.control_plane:main"
+gateway-governor-reconcile = "gateway_policy.jobs:reconcile_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["gateway_policy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

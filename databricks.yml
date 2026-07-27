@@ -1,0 +1,50 @@
+bundle:
+  name: adaptive-ai-spend-governor
+
+include:
+  - resources/*.yml
+
+artifacts:
+  default:
+    type: whl
+    build: python -m build
+    path: .
+
+variables:
+  warehouse_id:
+    description: SQL warehouse used to query system tables
+  governed_endpoint_name:
+    description: Unity AI Gateway serving endpoint or model service to govern
+  forecast_endpoint_name:
+    description: Advisory Model Serving endpoint implementing the forecast contract
+  lakebase_branch:
+    description: Full Lakebase branch resource name
+  lakebase_database:
+    description: Full Lakebase database resource name
+  lakebase_endpoint:
+    description: Full Lakebase endpoint resource name used by the reconciliation job
+  run_as_service_principal_name:
+    description: Service principal that owns scheduled reconciliation runs
+  session_secret_scope:
+    description: Databricks secret scope containing the session-signing secret
+  session_secret_key:
+    description: Secret key containing a high-entropy session-signing secret
+  node_type_id:
+    default: Standard_DS3_v2
+
+sync:
+  exclude:
+    - .venv
+    - .pytest_cache
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: DEFAULT
+
+  prod:
+    mode: production
+    workspace:
+      profile: prod

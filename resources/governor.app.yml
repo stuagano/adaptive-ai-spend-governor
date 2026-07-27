@@ -1,0 +1,32 @@
+resources:
+  apps:
+    governor:
+      name: adaptive-ai-spend-governor-${bundle.target}
+      description: Managed Omnigent and Unity AI Gateway spend-governance control plane
+      source_code_path: ..
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: governed-endpoint
+          serving_endpoint:
+            name: ${var.governed_endpoint_name}
+            permission: CAN_MANAGE
+        - name: forecast-endpoint
+          serving_endpoint:
+            name: ${var.forecast_endpoint_name}
+            permission: CAN_QUERY
+        - name: postgres
+          postgres:
+            branch: ${var.lakebase_branch}
+            database: ${var.lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE
+        - name: session-secret
+          secret:
+            scope: ${var.session_secret_scope}
+            key: ${var.session_secret_key}
+            permission: READ
+      permissions:
+        - group_name: users
+          level: CAN_USE

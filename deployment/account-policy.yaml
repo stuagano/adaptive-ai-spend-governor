@@ -1,0 +1,42 @@
+apiVersion: gateway-policy.databricks.com/v1
+kind: GatewayPolicyBundle
+metadata:
+  name: adaptive-ai-spend-account-controls
+  owner: platform-team@example.com
+  managedBy: gateway-policy
+
+spec:
+  account:
+    accountId: ${DATABRICKS_ACCOUNT_ID}
+    profile: account
+
+  workspaces:
+    - name: "${DATABRICKS_WORKSPACE_ID}"
+      host: ${DATABRICKS_HOST}
+
+  budgets:
+    - name: ai-gateway-account-ceiling
+      displayName: AI Gateway account ceiling
+      resourceType: unity_ai_gateway
+      workspaces: []
+      sharedThresholds:
+        - amountUsd: 25000
+          emails:
+            - finops@example.com
+            - platform-team@example.com
+
+    - name: governed-workspace-budget
+      displayName: Governed AI workspace budget
+      resourceType: unity_ai_gateway
+      workspaces:
+        - "${DATABRICKS_WORKSPACE_ID}"
+      tags:
+        managed-path: adaptive-ai-spend-governor
+      sharedThresholds:
+        - amountUsd: 20000
+          emails:
+            - platform-team@example.com
+      perUserThreshold:
+        amountUsd: 1000
+        emails:
+          - platform-team@example.com

@@ -1,0 +1,22 @@
+command:
+  - python
+  - -m
+  - gateway_policy.control_plane
+
+env:
+  - name: GATEWAY_POLICY_FILE
+    value: deployment/gateway-policy.yaml
+  - name: GATEWAY_POLICY_ENABLE_APPLY
+    value: "false"
+  - name: GATEWAY_POLICY_SESSION_POLICY
+    value: central-session
+  - name: GATEWAY_POLICY_SESSION_SECRET
+    valueFrom: session-secret
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: GOVERNED_ENDPOINT
+    valueFrom: governed-endpoint
+  - name: FORECAST_ENDPOINT
+    valueFrom: forecast-endpoint
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres

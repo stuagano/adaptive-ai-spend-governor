@@ -1,0 +1,89 @@
+apiVersion: gateway-policy.databricks.com/v1
+kind: GatewayPolicyBundle
+metadata:
+  name: adaptive-ai-spend-governor
+  owner: platform-team@example.com
+  managedBy: gateway-policy
+
+spec:
+  account:
+    accountId: "runtime-not-used"
+    profile: DEFAULT
+
+  workspaces:
+    - name: runtime
+      host: ${DATABRICKS_HOST}
+
+  rateLimits:
+    - name: governed-model-service
+      workspace: runtime
+      endpoint: ${GOVERNED_ENDPOINT}
+      fallbackEnabled: true
+      limits:
+        - scope: endpoint
+          qpm: 500
+          tpm: 500000
+
+  governors:
+    - name: monthly-burn
+      workspace: runtime
+      rateLimitPolicy: governed-model-service
+      sqlWarehouseId: ${DATABRICKS_WAREHOUSE_ID}
+      forecastEndpoint: ${FORECAST_ENDPOINT}
+      monthlyTargetUsd: 25000
+      lookbackDays: 7
+      forecastHorizonDays: 30
+      pollingIntervalSeconds: 300
+      cooldownSeconds: 1800
+      hysteresisPct: 5
+      modelPrices:
+        - model: databricks-claude-sonnet-4
+          inputUsdPerMillionTokens: 3
+          outputUsdPerMillionTokens: 15
+        - model: databricks-meta-llama-3-3-70b-instruct
+          inputUsdPerMillionTokens: 0.5
+          outputUsdPerMillionTokens: 1.5
+      stages:
+        - name: caution
+          forecastUtilizationPct: 70
+          qpmMultiplier: 0.75
+          tpmMultiplier: 0.75
+          fallbackEnabled: true
+        - name: throttle
+          forecastUtilizationPct: 85
+          qpmMultiplier: 0.5
+          tpmMultiplier: 0.5
+          fallbackEnabled: true
+        - name: emergency
+          forecastUtilizationPct: 100
+          qpmMultiplier: 0.1
+          tpmMultiplier: 0.1
+          fallbackEnabled: true
+
+  sessionBudgets:
+    - name: central-session
+      workspace: runtime
+      endpoint: ${GOVERNED_ENDPOINT}
+      upstreamBaseUrl: ${DATABRICKS_HOST}/ai-gateway/mlflow
+      maxUsd: 10
+      maxTotalTokens: 250000
+      timeoutSeconds: 3600
+      allowedRequestTagKeys:
+        - project
+        - team
+        - environment
+      failMode: fail_closed
+      modelPrices:
+        - model: ${GOVERNED_ENDPOINT}
+          inputUsdPerMillionTokens: 3
+          outputUsdPerMillionTokens: 15
+
+  omnigent:
+    sessionCostBudget:
+      askThresholdsUsd: [5, 8]
+      maxCostUsd: 10
+      expensiveModels: [opus, gpt-5]
+    userDailyCostBudget:
+      askThresholdsUsd: [25, 40]
+      maxCostUsd: 50
+      expensiveModels: [opus, gpt-5]

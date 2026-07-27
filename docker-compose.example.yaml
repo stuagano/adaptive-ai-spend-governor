@@ -1,0 +1,43 @@
+services:
+  proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      GATEWAY_POLICY_SESSION_SECRET: ${GATEWAY_POLICY_SESSION_SECRET:-dev-only-change-me}
+      DATABRICKS_HOST: ${DATABRICKS_HOST}
+      DATABRICKS_TOKEN: ${DATABRICKS_TOKEN}
+    volumes:
+      - gateway-policy-state:/data
+    command:
+      - gateway-policy
+      - proxy
+      - run
+      - gateway-policy.example.yaml
+      - --policy-name
+      - agent-sandbox-session
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --state-path
+      - /data/state.db
+
+  governor:
+    build: .
+    environment:
+      DATABRICKS_HOST: ${DATABRICKS_HOST}
+      DATABRICKS_TOKEN: ${DATABRICKS_TOKEN}
+    volumes:
+      - gateway-policy-state:/data
+    command:
+      - gateway-policy
+      - governor
+      - run
+      - gateway-policy.example.yaml
+      - --apply
+      - --state-path
+      - /data/state.db
+
+volumes:
+  gateway-policy-state:
