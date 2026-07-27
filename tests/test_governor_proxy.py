@@ -262,9 +262,9 @@ def test_proxy_requires_signed_session_when_mandatory(tmp_path: Path) -> None:
     )
     client = TestClient(app)
 
-    missing = client.post("/v1/chat/completions", json={"model": "test-model"})
+    missing = client.post("/api/v1/chat/completions", json={"model": "test-model"})
     unsigned = client.post(
-        "/v1/chat/completions",
+        "/api/v1/chat/completions",
         headers={"X-Session-Id": session.session_id},
         json={"model": "test-model"},
     )
@@ -285,24 +285,38 @@ def test_session_creation_uses_trusted_forwarded_identity(tmp_path: Path) -> Non
         session_policies=session_policy_map(bundle),
         session_token_secret="secret",
         require_session=True,
-        trusted_identity_header="X-Forwarded-Email",
+        trusted_identity_header="X-Forwarded-Email,X-Forwarded-User",
     )
     client = TestClient(app)
 
     missing = client.post(
-        "/sessions",
+        "/api/sessions",
         json={"policy_name": "agent-session", "identity": "spoofed@example.com"},
     )
     created = client.post(
-        "/sessions",
-        headers={"X-Forwarded-Email": "alice@example.com"},
+        "/api/sessions",
+        headers={
+            "Authorization": "Bearer app-oauth-token",
+            "X-Forwarded-Email": "alice@example.com",
+        },
+        json={"policy_name": "agent-session", "identity": "spoofed@example.com"},
+    )
+    service_principal = client.post(
+        "/api/sessions",
+        headers={
+            "Authorization": "Bearer app-oauth-token",
+            "X-Forwarded-User": "application-client-id",
+        },
         json={"policy_name": "agent-session", "identity": "spoofed@example.com"},
     )
 
     assert missing.status_code == 401
     assert created.status_code == 200
+    assert service_principal.status_code == 200
     session_id = created.json()["session_id"]
     assert manager.get_session(session_id).identity == "alice@example.com"
+    service_principal_session_id = service_principal.json()["session_id"]
+    assert manager.get_session(service_principal_session_id).identity == "application-client-id"
 
 
 def test_mandatory_proxy_uses_service_identity_and_policy_endpoint(
@@ -334,8 +348,11 @@ def test_mandatory_proxy_uses_service_identity_and_policy_endpoint(
     client = TestClient(app)
 
     response = client.post(
-        "/v1/chat/completions",
-        headers={"Authorization": f"Bearer {token}"},
+        "/api/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer app-oauth-token",
+            "X-Gateway-Session-Token": token,
+        },
         json={"model": "unapproved-model", "messages": []},
     )
 

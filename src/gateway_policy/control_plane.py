@@ -117,7 +117,7 @@ def build_control_plane_from_env() -> FastAPI:
         session_token_secret=os.environ["GATEWAY_POLICY_SESSION_SECRET"],
         upstream_headers_provider=workspace.config.authenticate,
         require_session=True,
-        trusted_identity_header="X-Forwarded-Email",
+        trusted_identity_header="X-Forwarded-Email,X-Forwarded-User",
         upstream_base_urls={
             "/v1/chat/completions": f"{host}/ai-gateway/mlflow",
             "/v1/embeddings": f"{host}/ai-gateway/mlflow",

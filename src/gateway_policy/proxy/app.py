@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from gateway_policy.models import SessionBudgetPolicy
@@ -46,16 +46,12 @@ def create_app(
     def prometheus_metrics() -> PlainTextResponse:
         return PlainTextResponse(metrics.to_prometheus(), media_type="text/plain")
 
+    @app.post("/api/sessions")
     @app.post("/sessions")
     def create_session(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
         policy_name = str(payload["policy_name"])
         if trusted_identity_header:
-            identity = request.headers.get(trusted_identity_header)
-            if not identity:
-                raise HTTPException(
-                    status_code=401,
-                    detail=f"missing trusted identity header: {trusted_identity_header}",
-                )
+            identity = _resolve_trusted_identity(request, trusted_identity_header)
         else:
             identity = str(payload["identity"])
         project = payload.get("project")
@@ -65,46 +61,57 @@ def create_app(
         response["session_token"] = token
         return response
 
+    def verify_session_access(
+        session_id: str,
+        authorization: str | None = Header(default=None),
+        x_gateway_session_token: str | None = Header(
+            default=None,
+            alias="X-Gateway-Session-Token",
+        ),
+    ) -> None:
+        _require_matching_session_token(
+            authorization,
+            x_gateway_session_token,
+            session_id,
+            session_token_secret,
+            require_session,
+        )
+
+    @app.get("/api/sessions/{session_id}")
     @app.get("/sessions/{session_id}")
     def show_session(
         session_id: str,
-        authorization: str | None = Header(default=None),
+        _: None = Depends(verify_session_access),
     ) -> dict[str, Any]:
-        _require_matching_session_token(
-            authorization,
-            session_id,
-            session_token_secret,
-            require_session,
-        )
         return session_manager.remaining_budget(session_id)
 
+    @app.delete("/api/sessions/{session_id}")
     @app.delete("/sessions/{session_id}")
     def close_session(
         session_id: str,
-        authorization: str | None = Header(default=None),
+        _: None = Depends(verify_session_access),
     ) -> dict[str, str]:
-        _require_matching_session_token(
-            authorization,
-            session_id,
-            session_token_secret,
-            require_session,
-        )
         session_manager.close_session(session_id)
         return {"status": "closed", "session_id": session_id}
 
-    def register_openai_route(path: str) -> None:
-        @app.post(path)
+    def register_openai_route(route_path: str, upstream_path: str) -> None:
+        @app.post(route_path)
         async def proxy_openai(
             request: Request,
             authorization: str | None = Header(default=None),
+            x_gateway_session_token: str | None = Header(
+                default=None,
+                alias="X-Gateway-Session-Token",
+            ),
             x_session_id: str | None = Header(default=None, alias="X-Session-Id"),
             x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
             x_idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
         ) -> Any:
             return await _proxy_openai_request(
                 request=request,
-                path=path,
+                path=upstream_path,
                 authorization=authorization,
+                session_token=x_gateway_session_token,
                 session_id=x_session_id,
                 request_id=x_request_id or str(uuid4()),
                 idempotency_key=x_idempotency_key,
@@ -122,7 +129,8 @@ def create_app(
             )
 
     for openai_path in ("/v1/chat/completions", "/v1/responses", "/v1/embeddings"):
-        register_openai_route(openai_path)
+        register_openai_route(openai_path, openai_path)
+        register_openai_route(f"/api{openai_path}", openai_path)
 
     return app
 
@@ -131,6 +139,7 @@ async def _proxy_openai_request(
     request: Request,
     path: str,
     authorization: str | None,
+    session_token: str | None,
     session_id: str | None,
     request_id: str,
     idempotency_key: str | None,
@@ -149,6 +158,7 @@ async def _proxy_openai_request(
     metrics.requests_total += 1
     session_id = _resolve_session_id(
         authorization,
+        session_token,
         session_id,
         session_token_secret,
         allow_unsigned_session_id=not require_session,
@@ -248,14 +258,35 @@ async def _proxy_openai_request(
         return JSONResponse(content=payload)
 
 
+def _resolve_trusted_identity(request: Request, trusted_identity_header: str) -> str:
+    identity_headers = [
+        name.strip() for name in trusted_identity_header.split(",") if name.strip()
+    ]
+    for name in identity_headers:
+        value = request.headers.get(name)
+        if value:
+            return value
+    raise HTTPException(
+        status_code=401,
+        detail=f"missing trusted identity header: {', '.join(identity_headers)}",
+    )
+
+
 def _resolve_session_id(
     authorization: str | None,
+    session_token: str | None,
     session_id: str | None,
     secret: str,
     allow_unsigned_session_id: bool = True,
 ) -> str | None:
     if session_id and allow_unsigned_session_id:
         return session_id
+    if session_token:
+        token = session_token.removeprefix("gpst_")
+        try:
+            return verify_session_token(token, secret)
+        except SessionTokenError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
     if authorization and authorization.lower().startswith("bearer gpst_"):
         token = authorization.split(" ", maxsplit=1)[1].removeprefix("gpst_")
         try:
@@ -267,6 +298,7 @@ def _resolve_session_id(
 
 def _require_matching_session_token(
     authorization: str | None,
+    session_token: str | None,
     session_id: str,
     secret: str,
     required: bool,
@@ -275,6 +307,7 @@ def _require_matching_session_token(
         return
     resolved = _resolve_session_id(
         authorization,
+        session_token,
         None,
         secret,
         allow_unsigned_session_id=False,
