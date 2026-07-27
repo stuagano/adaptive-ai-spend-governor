@@ -1,44 +1,154 @@
-# Gateway Policy-as-Code Toolkit
+# Adaptive AI Spend Governor for Databricks
 
-Declarative policy management for **Databricks Unity AI Gateway** spend controls:
+## What this is
 
-- Account **budgets** (shared + per-user thresholds, Genie hard caps)
-- Serving endpoint **AI Gateway rate limits** (QPM/TPM by endpoint/user/group/service principal)
+This repository is a Databricks-native control plane for governing AI and agent spend.
+It combines:
 
-Inspired by prior art in [`AI-GATEWAY-COST-PRIOR-ART.md`](AI-GATEWAY-COST-PRIOR-ART.md).
+- A mandatory OpenAI-compatible proxy that enforces immediate session USD/token limits.
+- A burn-rate governor that forecasts month-end spend and adjusts Unity AI Gateway
+  QPM/TPM limits.
+- Policy-as-code for account budgets, endpoint rate limits, session budgets, and
+  managed Omnigent cost policies.
+- Lakebase for transactional session, reservation, governor, idempotency, and audit state.
+- A Databricks App for the proxy and control-plane APIs.
+- A scheduled Lakeflow Job for authoritative billing reconciliation.
 
-## Install
+It does not replace Unity AI Gateway. It adds immediate runtime enforcement and adaptive
+controls around the Gateway while keeping Databricks system tables as the authoritative
+source for reconciled spend.
+
+## Why this exists
+
+AI spend controls operate at different speeds:
+
+- Account budgets and billing tables provide authoritative visibility, but billing data
+  arrives too late to stop a single runaway agent session.
+- Static QPM/TPM limits constrain capacity, but do not react to whether the organization
+  is ahead of or behind its monthly budget.
+- Omnigent can interrupt managed agent sessions, but it does not govern every application
+  or replace account-wide platform controls.
+- Provider fallback improves availability after `429`/`5xx` responses, but is not
+  proactive cost routing.
+
+This project closes those gaps with two coordinated loops:
+
+1. **Immediate loop:** reserve estimated cost in Lakebase before a model request, reject
+   requests that exceed the session cap, and reconcile the reservation with actual usage.
+2. **Adaptive loop:** query Databricks billing and AI Gateway telemetry, forecast
+   month-end spend, and progressively tighten or restore QPM/TPM using deterministic
+   thresholds, hysteresis, and cooldowns.
+
+The result is one centrally operated path for Omnigent and non-Omnigent teams without
+requiring every team to adopt the same agent framework.
+
+## What a request looks like
+
+```text
+Application or Omnigent agent
+        |
+        | Databricks OAuth + signed gateway-session header
+        v
+Databricks App: mandatory session-budget proxy
+        |
+        | App service-principal OAuth + request tags
+        v
+Unity AI Gateway model service
+        |
+        v
+Model destination
+
+Lakeflow Job -> system billing/AI Gateway tables -> forecast -> adaptive QPM/TPM
+                          |
+                          v
+                       Lakebase audit
+```
+
+All production clients use the App URL. Omnigent teams additionally receive its built-in
+ASK/DENY policies. Non-Omnigent clients still receive session enforcement, centralized
+budgets, attribution, and adaptive rate limits.
+
+## Who operates what
+
+**Central platform team**
+
+- Deploys the App, Lakeflow Job, Lakebase resources, and optional forecast endpoint.
+- Owns account budgets, session policies, QPM/TPM baselines, and governor thresholds.
+- Grants teams access to the App and removes their direct access to the governed model
+  service.
+- Reviews governor decisions and audit records.
+
+**Application teams**
+
+- Create a budgeted session through the App.
+- Send OpenAI-compatible requests using the returned signed session token.
+- Include approved metadata such as `project`, `team`, and `environment`.
+- Do not need account-admin credentials or direct model-service access.
+
+## Repository map
+
+| Path | What it explains or implements |
+|---|---|
+| `deployment/gateway-policy.yaml` | Runtime policy: session cap, models, governor stages, QPM/TPM |
+| `deployment/account-policy.yaml` | Centrally managed account/workspace AI Gateway budgets |
+| `src/gateway_policy/control_plane.py` | Assembles the App, governor, Lakebase, and mandatory proxy |
+| `src/gateway_policy/proxy/` | Session lifecycle, signed tokens, request enforcement, and routing |
+| `src/gateway_policy/governor/` | Forecasting, telemetry, adaptive decisions, and persistence |
+| `src/gateway_policy/jobs.py` | Scheduled reconciliation entry point |
+| `src/gateway_policy/models.py` | Complete policy schema and validation |
+| `databricks.yml`, `resources/`, `app.yaml` | Deployable Databricks bundle resources |
+| `tests/` | Governor, proxy, policy, CLI, and end-to-end behavior |
+
+## Use it locally
+
+### 1. Install
 
 ```bash
-cd "gateway api"
+git clone https://github.com/stuagano/adaptive-ai-spend-governor.git
+cd adaptive-ai-spend-governor
 python -m pip install -e ".[dev]"
 ```
 
-Authenticate with Databricks (OAuth recommended):
+### 2. Authenticate
 
 ```bash
 databricks auth login --account-id <account-id>
 databricks auth login --host https://<workspace-host>
 ```
 
-## Quick start
+OAuth is recommended. Never place Databricks tokens or session-signing secrets in policy
+files.
+
+### 3. Validate and inspect the example
 
 ```bash
-# Validate policy schema and semantics
 gateway-policy validate gateway-policy.example.yaml
-
-# Inspect normalized policy JSON
 gateway-policy show gateway-policy.example.yaml --json
-
-# Dry-run plan (offline)
 gateway-policy plan gateway-policy.example.yaml --offline
+```
 
-# Live drift plan
+### 4. Test the governor without changing Databricks
+
+```bash
+gateway-policy governor status gateway-policy.example.yaml \
+  --name ml-platform-monthly-burn --offline --json
+
+gateway-policy governor evaluate gateway-policy.example.yaml \
+  --name ml-platform-monthly-burn --offline --json
+```
+
+### 5. Preview or apply platform policy
+
+```bash
 gateway-policy plan gateway-policy.example.yaml --json
-
-# Apply (requires explicit confirmation)
 gateway-policy apply gateway-policy.example.yaml --yes
 ```
+
+`plan` is read-only. `apply` requires live credentials and explicit confirmation.
+For a production deployment, continue with [Databricks-native deployment](#databricks-native-deployment).
+
+Background and product comparison are documented in
+[`AI-GATEWAY-COST-PRIOR-ART.md`](AI-GATEWAY-COST-PRIOR-ART.md).
 
 ## Policy model
 
@@ -229,16 +339,52 @@ The reconciliation schedule is deployed paused. Before unpausing it, grant the r
 
 ### Team request path
 
-All production model traffic goes through the App URL rather than directly to the
-governed endpoint:
+All production model traffic goes through the App's `/api` routes rather than directly
+to the governed endpoint. Databricks App authentication continues to use the standard
+`Authorization: Bearer <Databricks OAuth token>` header. The separate signed budget
+token is sent as `X-Gateway-Session-Token`.
 
-1. Create a session with `POST /sessions`. In Databricks Apps, the proxy takes the
-   authenticated identity from `X-Forwarded-Email`; a caller cannot select another
-   identity in the JSON body.
-2. Use the returned `gpst_...` token as `Authorization: Bearer gpst_...`.
-3. Call `/v1/chat/completions`, `/v1/responses`, or `/v1/embeddings`.
+1. Create a session with `POST /api/sessions`. The App derives the identity from
+   Databricks' trusted `X-Forwarded-Email` or `X-Forwarded-User` header; a caller cannot
+   select another identity in the JSON body.
+2. Keep the returned `gpst_...` token for the lifetime of that session.
+3. Call `/api/v1/chat/completions`, `/api/v1/responses`, or `/api/v1/embeddings` with
+   both the Databricks OAuth header and `X-Gateway-Session-Token`.
 
-Unsigned `X-Session-Id` values and requests without a valid session token are rejected.
+Example using the OpenAI Python client:
+
+```python
+import os
+
+import requests
+from databricks.sdk import WorkspaceClient
+from openai import OpenAI
+
+app_url = os.environ["GATEWAY_APP_URL"].rstrip("/")
+app_auth = WorkspaceClient().config.authenticate()
+
+session = requests.post(
+    f"{app_url}/api/sessions",
+    headers=app_auth,
+    json={"policy_name": "central-session", "project": "my-project"},
+    timeout=30,
+).json()
+
+client = OpenAI(
+    api_key=app_auth["Authorization"].removeprefix("Bearer "),
+    base_url=f"{app_url}/api/v1",
+    default_headers={"X-Gateway-Session-Token": session["session_token"]},
+)
+
+response = client.chat.completions.create(
+    model="governed-model",  # The proxy replaces this with the approved policy endpoint.
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(response.choices[0].message.content)
+```
+
+Unsigned `X-Session-Id` values, missing gateway-session tokens, and invalid or expired
+tokens are rejected.
 The App authenticates to the governed endpoint with its own refreshed OAuth
 service-principal credentials. Omnigent teams use the same proxy path and additionally
 receive Omnigent's built-in ASK/DENY policy behavior.
