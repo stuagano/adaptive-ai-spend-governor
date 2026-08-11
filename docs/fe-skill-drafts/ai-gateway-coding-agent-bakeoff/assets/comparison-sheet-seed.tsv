@@ -1,0 +1,5 @@
+Model	CC_In	CC_Out	GW_In	GW_Out	Cache_Read	Cache_Write	GW_USD_Reported	CC_List_Est_USD	Notes
+Sonnet 5	9400000	13000000	818700000	12100000		646.33	148.80	Replace cache cols from SQL; example from sample POC
+Opus 4.6	679700	5500000	887900000	4270000		1361.04	140.90	
+Haiku 4.5	172400	219700	15700000	153700		8.22	1.27	
+TOTAL				2015.59	290.97	Illustrative — replace with customer data
