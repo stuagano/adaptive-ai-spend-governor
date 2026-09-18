@@ -7,9 +7,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import click
 import uvicorn
+from databricks.sdk.core import Config
 from rich.console import Console
 from rich.table import Table
 
@@ -219,6 +221,8 @@ def proxy_group() -> None:
 @click.option("--port", default=8080, show_default=True)
 @click.option("--state-path", type=click.Path(path_type=Path), default=DEFAULT_STATE_PATH)
 @click.option("--session-secret", default=None)
+@click.option("--profile", default=None, help="Databricks OAuth profile for upstream requests.")
+@click.option("--require-session", is_flag=True, help="Require a signed session token.")
 def proxy_run_cmd(
     policy_file: Path,
     policy_name: str,
@@ -226,6 +230,8 @@ def proxy_run_cmd(
     port: int,
     state_path: Path,
     session_secret: str | None,
+    profile: str | None,
+    require_session: bool,
 ) -> None:
     bundle = load_policy_file(policy_file)
     policy = next(
@@ -239,15 +245,44 @@ def proxy_run_cmd(
         "GATEWAY_POLICY_SESSION_SECRET",
         DEFAULT_SESSION_SECRET,
     )
+    if require_session and secret == DEFAULT_SESSION_SECRET:
+        raise click.ClickException("set GATEWAY_POLICY_SESSION_SECRET before requiring sessions")
     store = open_state_store(state_path)
     manager = _build_session_manager(policy_file, state_path, secret)
+    upstream_url = policy.upstream_base_url.rstrip("/")
+    if "/serving-endpoints/" in upstream_url and not upstream_url.endswith("/invocations"):
+        upstream_url += "/invocations"
+    upstream_headers = {"Authorization": f"Bearer {os.environ.get('DATABRICKS_TOKEN', '')}"}
+    config = Config(profile=profile) if profile else None
+    if config and urlsplit(config.host)[:2] != urlsplit(upstream_url)[:2]:
+        raise click.ClickException("upstream host does not match the selected Databricks profile")
+
+    def authenticate() -> dict[str, str]:
+        return config.authenticate() if config else upstream_headers
+
+    # Responses/embeddings aren't served by every gateway path (e.g. the Cursor
+    # chat-completions path 404s them). Route them to the AI Gateway mlflow path
+    # on the same host, leaving chat/completions on the policy's configured upstream.
+    host = urlsplit(upstream_url)
+    upstream_base_urls = None
+    if host.scheme and "/ai-gateway/" in upstream_url:
+        gateway_root = f"{host.scheme}://{host.netloc}/ai-gateway/mlflow"
+        upstream_base_urls = {
+            "/v1/responses": gateway_root,
+            "/v1/embeddings": gateway_root,
+        }
+
     app = create_app(
         session_manager=manager,
         store=store,
         upstream_headers={},
-        default_upstream_base_url=policy.upstream_base_url,
+        default_upstream_base_url=upstream_url,
         session_policies={policy.name: policy},
         session_token_secret=secret,
+        upstream_headers_provider=authenticate,
+        require_session=require_session,
+        upstream_base_urls=upstream_base_urls,
+        enforce_policy_endpoint=require_session,
     )
     uvicorn.run(app, host=host, port=port)
 
