@@ -263,10 +263,10 @@ def proxy_run_cmd(
     # Responses/embeddings aren't served by every gateway path (e.g. the Cursor
     # chat-completions path 404s them). Route them to the AI Gateway mlflow path
     # on the same host, leaving chat/completions on the policy's configured upstream.
-    host = urlsplit(upstream_url)
+    upstream_parts = urlsplit(upstream_url)
     upstream_base_urls = None
-    if host.scheme and "/ai-gateway/" in upstream_url:
-        gateway_root = f"{host.scheme}://{host.netloc}/ai-gateway/mlflow"
+    if upstream_parts.scheme and "/ai-gateway/" in upstream_url:
+        gateway_root = f"{upstream_parts.scheme}://{upstream_parts.netloc}/ai-gateway/mlflow"
         upstream_base_urls = {
             "/v1/responses": gateway_root,
             "/v1/embeddings": gateway_root,
