@@ -101,6 +101,9 @@ budgets, attribution, and adaptive rate limits.
 
 ## Use it locally
 
+For the Zed Agent connection, credential renewal, and compatibility notes, see
+[Use the local gateway in Zed](docs/zed-gateway.md).
+
 ### 1. Install
 
 ```bash

@@ -11,3 +11,9 @@ dist/
 build/
 *.egg-info/
 uv.lock
+
+# macOS
+.DS_Store
+
+# Personal local dev policy (use gateway-policy.example.yaml as template)
+local-policy.yaml

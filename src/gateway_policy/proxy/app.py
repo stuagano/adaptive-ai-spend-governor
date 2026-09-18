@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from gateway_policy.models import SessionBudgetPolicy
+from gateway_policy.proxy.compatibility import ToolCallMetadata
 from gateway_policy.proxy.metrics import metrics
 from gateway_policy.proxy.session import SessionManager, SessionRecord
 from gateway_policy.proxy.store import SessionStateStore
@@ -179,12 +180,25 @@ async def _proxy_openai_request(
         raise HTTPException(status_code=429, detail="governor blocked proxy traffic")
 
     body = await request.json()
+    body = _sanitize_for_upstream(body)
+    tool_metadata = ToolCallMetadata(store, session_id)
+    tool_metadata.restore(body)
     model = str(body.get("model", "unknown"))
     if enforce_policy_endpoint and policy is not None:
         model = policy.endpoint
         body["model"] = model
     stream = bool(body.get("stream", False))
     max_tokens = int(body.get("max_tokens", max_output_tokens_default))
+
+    upstream_base_url = (upstream_base_urls or {}).get(path, default_upstream_base_url).rstrip("/")
+    if upstream_base_url.endswith("/invocations"):
+        if path != "/v1/chat/completions":
+            raise HTTPException(
+                status_code=400, detail="this upstream supports Chat Completions only"
+            )
+        url = upstream_base_url
+    else:
+        url = upstream_base_url + path
 
     reservation_id: str | None = None
     if session_id:
@@ -219,21 +233,18 @@ async def _proxy_openai_request(
         headers["Authorization"] = authorization
     headers["Databricks-Ai-Gateway-Request-Tags"] = json.dumps(request_tags)
 
-    upstream_base_url = (upstream_base_urls or {}).get(path, default_upstream_base_url)
-    url = upstream_base_url.rstrip("/") + path
+    if stream:
+        return await _stream_response(
+            url,
+            headers,
+            body,
+            session_manager,
+            session_id,
+            reservation_id,
+            model,
+            tool_metadata,
+        )
     async with httpx.AsyncClient(timeout=120.0) as client:
-        if stream:
-            return await _stream_response(
-                client,
-                url,
-                headers,
-                body,
-                session_manager,
-                session_id,
-                reservation_id,
-                model,
-            )
-
         response = await client.post(url, headers=headers, json=body)
         if response.status_code >= 400:
             if session_id and reservation_id:
@@ -244,6 +255,7 @@ async def _proxy_openai_request(
                 payload = {"error": response.text}
             return JSONResponse(status_code=response.status_code, content=payload)
         payload = response.json()
+        tool_metadata.observe(payload)
         if session_id and reservation_id:
             usage = payload.get("usage", {})
             session_manager.finalize(
@@ -259,9 +271,7 @@ async def _proxy_openai_request(
 
 
 def _resolve_trusted_identity(request: Request, trusted_identity_header: str) -> str:
-    identity_headers = [
-        name.strip() for name in trusted_identity_header.split(",") if name.strip()
-    ]
+    identity_headers = [name.strip() for name in trusted_identity_header.split(",") if name.strip()]
     for name in identity_headers:
         value = request.headers.get(name)
         if value:
@@ -336,8 +346,38 @@ def _build_request_tags(
     return tags
 
 
+def _sanitize_for_upstream(body: dict[str, Any]) -> dict[str, Any]:
+    """Strip OpenAI-specific fields that Gemini (via Databricks AI Gateway) rejects."""
+    body = dict(body)
+    # stream_options is OpenAI-only; Gemini rejects it
+    body.pop("stream_options", None)
+    # Recursively strip JSON Schema meta-fields from tool parameter schemas
+    if "tools" in body:
+        body["tools"] = [_sanitize_tool(t) for t in body["tools"]]
+    return body
+
+
+def _sanitize_tool(tool: Any) -> Any:
+    if not isinstance(tool, dict):
+        return tool
+    tool = dict(tool)
+    if "function" in tool and isinstance(tool["function"], dict):
+        fn = dict(tool["function"])
+        if "parameters" in fn:
+            fn["parameters"] = _strip_json_schema_meta(fn["parameters"])
+        tool["function"] = fn
+    return tool
+
+
+def _strip_json_schema_meta(schema: Any) -> Any:
+    """Recursively remove $schema, $defs, and resolve $ref stubs from a JSON Schema object."""
+    _BLOCKED = {"$schema", "$defs", "$ref", "$id", "$comment"}
+    if not isinstance(schema, dict):
+        return schema
+    return {k: _strip_json_schema_meta(v) for k, v in schema.items() if k not in _BLOCKED}
+
+
 async def _stream_response(
-    client: httpx.AsyncClient,
     url: str,
     headers: dict[str, str],
     body: dict[str, Any],
@@ -345,40 +385,61 @@ async def _stream_response(
     session_id: str | None,
     reservation_id: str | None,
     model: str,
-) -> StreamingResponse:
+    tool_metadata: ToolCallMetadata,
+) -> StreamingResponse | JSONResponse:
+    client = httpx.AsyncClient(timeout=120.0)
+    try:
+        upstream_request = client.build_request("POST", url, headers=headers, json=body)
+        response = await client.send(upstream_request, stream=True)
+    except Exception:
+        await client.aclose()
+        if session_id and reservation_id:
+            session_manager.finalize(reservation_id, model, 0, 0, session_id)
+        raise
+    if response.status_code >= 400:
+        try:
+            await response.aread()
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {"error": response.text}
+            return JSONResponse(status_code=response.status_code, content=payload)
+        finally:
+            await response.aclose()
+            await client.aclose()
+            if session_id and reservation_id:
+                session_manager.finalize(reservation_id, model, 0, 0, session_id)
+
     async def event_generator() -> Any:
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         try:
-            async with client.stream("POST", url, headers=headers, json=body) as response:
-                async for chunk in response.aiter_bytes():
-                    text = chunk.decode("utf-8", errors="ignore")
-                    if '"usage"' in text:
-                        for line in text.splitlines():
-                            if line.startswith("data: ") and '"usage"' in line:
-                                try:
-                                    payload = json.loads(line.removeprefix("data: ").strip())
-                                    usage = payload.get("usage", usage)
-                                except json.JSONDecodeError:
-                                    pass
-                    yield chunk
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    try:
+                        payload = json.loads(line.removeprefix("data:").strip())
+                    except json.JSONDecodeError:
+                        payload = {}
+                    if isinstance(payload, dict):
+                        tool_metadata.observe(payload)
+                    candidate = payload.get("usage") if isinstance(payload, dict) else None
+                    if isinstance(candidate, dict):
+                        for field in usage:
+                            if candidate.get(field) is not None:
+                                usage[field] = int(candidate[field])
+                yield line + "\n"
         except Exception:
             metrics.stream_disconnects_total += 1
+            raise
+        finally:
+            await response.aclose()
+            await client.aclose()
             if session_id and reservation_id:
                 session_manager.finalize(
                     reservation_id,
                     model,
                     usage["prompt_tokens"],
-                    max(usage["completion_tokens"], 1),
+                    usage["completion_tokens"],
                     session_id,
                 )
-            raise
-        if session_id and reservation_id:
-            session_manager.finalize(
-                reservation_id,
-                model,
-                usage["prompt_tokens"],
-                usage["completion_tokens"],
-                session_id,
-            )
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
